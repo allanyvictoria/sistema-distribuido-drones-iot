@@ -319,7 +319,7 @@ go run Teste.go migracao localhost:1053 localhost:1054 localhost:1055 broker1 dr
 
 ```
 
-> **⚠️ Requisito para os testes de falha:**
+> ** Requisito para os testes de falha:**
 > Os cenários `drone_cai` e `migracao` executam comandos como `docker stop` / `docker start` internamente para simular as quedas físicas. É necessário rodar esses testes específicos em um terminal que possua permissões ativas para interagir com o daemon do Docker.
 
 ```
