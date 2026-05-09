@@ -51,7 +51,7 @@ func (f FilaRequisicoes) Swap(i, j int) {
 func (f *FilaRequisicoes) Push(x any) {
 	requisicao := x.(*Requisicao)
 	*f = append(*f, requisicao)
-	fmt.Printf("[FILA] ENTROU: Req %s | Tipo: %s | Prioridade: %d | Tamanho atual: %d\n", requisicao.ID, requisicao.Tipo, requisicao.Prioridade, len(*f))
+
 }
 
 // remove e retorna o de maior prioridade
@@ -60,7 +60,6 @@ func (f *FilaRequisicoes) Pop() any {
 	item := (*f)[n-1]
 	*f = (*f)[:n-1]
 
-	fmt.Printf("[FILA] SAIU: Req %s | Tipo: %s | Prioridade: %d | Tamanho atual: %d\n", item.ID, item.Tipo, item.Prioridade, len(*f))
 	return item
 }
 

@@ -63,7 +63,7 @@ func despacharDrone() bool {
 			//log.Printf("[BROKER] Consultando broker %s...", broker)
 			conn, err := net.Dial("tcp", fmt.Sprintf("%s:1053", broker))
 			if err != nil {
-				log.Printf("Erro ao conectar com broker %s: %v", broker, err)
+				//log.Printf("Erro ao conectar com broker %s: %v", broker, err)
 				continue
 			}
 

@@ -61,10 +61,17 @@ func handleBroker(m Mensagem, conn net.Conn) {
 		rwmu.Unlock()
 
 	case "CONCLUSAO_REMOTA":
+		payloadLimpo := strings.TrimSpace(m.Payload)
+
 		rwmu.Lock()
-		req := mapaRequisicoes[m.Payload]
+		req := mapaRequisicoes[payloadLimpo]
 		if req != nil {
 			req.Status = "concluida"
+			log.Printf("[BROKER] Conclusão remota recebida com sucesso para a requisição %s!", payloadLimpo)
+			fmt.Printf("[FILA] SAIU: Req %s | Tipo: %s | Prioridade: %d | Tamanho atual: %d\n", req.ID, req.Tipo, req.Prioridade, filaRequisicoes.Len())
+		} else {
+			// Se cair aqui, a gente sabe que algo se perdeu!
+			log.Printf("[BROKER] ALERTA: Conclusão remota recebida, mas requisição %s não encontrada localmente.", payloadLimpo)
 		}
 		rwmu.Unlock()
 	}

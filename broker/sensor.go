@@ -38,6 +38,7 @@ func adicionarRequisicao(m Mensagem) {
 	mapaRequisicoes[novaRequisicao.ID] = novaRequisicao
 	heap.Push(&filaRequisicoes, novaRequisicao)
 	log.Printf("[BROKER] Nova requisição recebida: %s criticidade %s", novaRequisicao.Tipo, novaRequisicao.Criticidade)
+	fmt.Printf("[FILA] ENTROU: Req %s | Tipo: %s | Prioridade: %d | Tamanho atual: %d\n", novaRequisicao.ID, novaRequisicao.Tipo, novaRequisicao.Prioridade, filaRequisicoes.Len())
 	despacharDrone()
 	rwmu.Unlock()
 }
