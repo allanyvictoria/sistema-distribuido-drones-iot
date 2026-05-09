@@ -1,0 +1,155 @@
+version: '3.8'
+
+networks:
+  estreito-net:
+    driver: bridge
+
+services:
+
+  # BROKERS
+  broker1:
+    build: ./broker
+    container_name: broker1
+    hostname: broker1
+    environment:
+      - BROKERS_ADDR=broker2,broker3
+    networks:
+      - estreito-net
+    ports:
+      - "1053:1053"  # expõe a porta 1053 para comunicação com sensores e drones
+
+  broker2:
+    build: ./broker
+    container_name: broker2
+    hostname: broker2
+    environment:
+      - BROKERS_ADDR=broker1,broker3
+    networks:
+      - estreito-net
+    ports:
+      - "1054:1053"  # expõe a porta 1053 para comunicação com sensores e drones
+
+  broker3:
+    build: ./broker
+    container_name: broker3
+    hostname: broker3
+    environment:
+      - BROKERS_ADDR=broker1,broker2
+    networks:
+      - estreito-net
+    ports:
+      - "1055:1053"  # expõe a porta 1053 para comunicação com sensores e drones
+
+  # SENSORES SETOR 1
+  sensor-setor1-deriva:
+    build: ./sensor
+    environment:
+      - BROKER_ADDR=broker1:1053
+      - INTERVALO=5
+    networks:
+      - estreito-net
+    depends_on:
+      - broker1
+
+  sensor-setor1-bloqueio:
+    build: ./sensor
+    environment:
+      - BROKER_ADDR=broker1:1053
+      - INTERVALO=5
+    networks:
+      - estreito-net
+    depends_on:
+      - broker1
+
+  # SENSORES SETOR 2
+  sensor-setor2-objeto:
+    build: ./sensor
+    environment:
+      - BROKER_ADDR=broker2:1053
+      - INTERVALO=5
+    networks:
+      - estreito-net
+    depends_on:
+      - broker2
+
+  sensor-setor2-congestionamento:
+    build: ./sensor
+    environment:
+      - BROKER_ADDR=broker2:1053
+      - INTERVALO=5
+    networks:
+      - estreito-net
+    depends_on:
+      - broker2
+
+  # SENSORES SETOR 3
+  sensor-setor3-inspecao:
+    build: ./sensor
+    environment:
+      - BROKER_ADDR=broker3:1053
+      - INTERVALO=5
+    networks:
+      - estreito-net
+    depends_on:
+      - broker3
+
+  sensor-setor3-risco:
+    build: ./sensor
+    environment:
+      - BROKER_ADDR=broker3:1053
+      - INTERVALO=5
+    networks:
+      - estreito-net
+    depends_on:
+      - broker3
+
+  # DRONES
+  drone-setor1:
+    build: ./drone
+    container_name: drone-setor1
+    environment:
+      - BROKER_ADDR=broker1:1053
+      - BROKERS_ADDR=broker2,broker3
+    networks:
+      - estreito-net
+    depends_on:
+      - broker1
+
+  drone-setor2:
+    build: ./drone
+    container_name: drone-setor2
+    environment:
+      - BROKER_ADDR=broker2:1053
+      - BROKERS_ADDR=broker1,broker3
+    networks:
+      - estreito-net
+    depends_on:
+      - broker2
+
+  drone-setor3:
+    build: ./drone
+    container_name: drone-setor3
+    environment:
+      - BROKER_ADDR=broker3:1053
+      - BROKERS_ADDR=broker1,broker2
+    networks:
+      - estreito-net
+    depends_on:
+      - broker3
+
+
+# SENSOR MANUAL
+
+  sensor-manual:
+      build: ./sensor-manual
+      container_name: sensor-manual
+      networks:
+        - estreito-net
+      depends_on:
+        - broker1
+        - broker2
+        - broker3
+      stdin_open: true   # mantém stdin aberto (equivalente ao -i do docker run)
+      tty: true          # aloca um terminal (equivalente ao -t do docker run)
+      profiles:
+        - manual      
