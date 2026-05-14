@@ -82,14 +82,21 @@ func main() {
 		if err != nil {
 			log.Printf("Erro ao enviar mensagem: %v. Tentando reconectar...", err)
 			// Tenta reconectar
-			conn.Close()
-			conn, err = conectarBroker()
-			if err != nil {
+			// Fecha a conexão antiga para evitar vazamento de recursos
+			if conn != nil {
+				conn.Close()
+			}
+
+			for {
+				conn, err = conectarBroker()
+				if err == nil {
+					log.Println("Reconectado com sucesso ao servidor.")
+					break // Conseguiu conectar! Sai do laço de reconexão.
+				}
+
 				log.Printf("Erro ao reconectar: %v. Tentando novamente em breve...", err)
 				time.Sleep(5 * time.Second) // Espera antes de tentar novamente
-				continue
 			}
-			log.Println("Reconectado com sucesso ao servidor.")
 		}
 
 		// Interface terminal do sensor
