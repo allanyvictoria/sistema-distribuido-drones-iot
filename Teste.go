@@ -29,42 +29,47 @@ func enviarRequisicao(addr, id, acao, criticidade string) error {
 	return err
 }
 
-// Faz RESERVA e retorna (droneID, brokerID, err).
-func reservar(addr, origemID string) (droneID string, brokerResp string, err error) {
+// Faz RESERVAR_E_DESPACHAR num broker remoto (ação atômica).
+func reservarEdespachar(addr, origemID, reqID, reqTipo string) (brokerResp string, err error) {
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
-	fmt.Fprint(conn, montar("BROKER", origemID, "RESERVA", ""))
+
+	// Novo payload: reqID/reqTipo/brokerOrigem
+	payload := fmt.Sprintf("%s/%s/%s", reqID, reqTipo, origemID)
+	fmt.Fprint(conn, montar("BROKER", origemID, "RESERVAR_E_DESPACHAR", payload))
+
 	resp, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	// BROKER;brokerN;RESERVA_OK;drone-id
-	// BROKER;brokerN;RESERVA_NEGADA;
+
+	// Formato esperado: BROKER;brokerN;DESPACHO_OK; ou DESPACHO_NEGADO
 	partes := strings.Split(strings.TrimSpace(resp), ";")
-	if len(partes) < 4 {
-		return "", "", fmt.Errorf("resposta mal formada: %s", resp)
+	if len(partes) < 3 {
+		return "", fmt.Errorf("resposta mal formada: %s", resp)
 	}
-	if partes[2] == "RESERVA_NEGADA" {
-		return "", partes[1], fmt.Errorf("RESERVA_NEGADA")
+	if partes[2] == "DESPACHO_NEGADO" {
+		return partes[1], fmt.Errorf("DESPACHO_NEGADO")
 	}
-	return partes[3], partes[1], nil
+	return partes[1], nil
 }
 
-// Faz DESPACHAR num broker remoto: droneID/reqID/tipo.
-func despachar(addr, origemID, droneID, reqID, tipo string) error {
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		return err
+// Fica tentando reservar e despachar até conseguir DESPACHO_OK ou estourar o timeout.
+func reservarEdespacharComRetry(addr, origemID, reqID, reqTipo string, timeout time.Duration) (brokerResp string, tentativas int, err error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		tentativas++
+		brokerResp, err = reservarEdespachar(addr, origemID, reqID, reqTipo)
+		if err == nil {
+			return // Sucesso!
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
-	payload := fmt.Sprintf("%s/%s/%s", droneID, reqID, tipo)
-	_, err = fmt.Fprint(conn, montar("BROKER", origemID, "DESPACHAR", payload))
-	return err
+	return "", tentativas, fmt.Errorf("timeout após %d tentativas: %w", tentativas, err)
 }
 
 func acessivel(addr string) bool {
@@ -74,21 +79,6 @@ func acessivel(addr string) bool {
 	}
 	conn.Close()
 	return true
-}
-
-// Fica tentando reserva até conseguir RESERVA_OK ou estourar o timeout.
-// Retorna droneID, brokerResp e quantas tentativas fez.
-func reservarComRetry(addr, origemID string, timeout time.Duration) (droneID, brokerResp string, tentativas int, err error) {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		tentativas++
-		droneID, brokerResp, err = reservar(addr, origemID)
-		if err == nil {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return "", "", tentativas, fmt.Errorf("timeout após %d tentativas: %w", tentativas, err)
 }
 
 // Lê logs de um container Docker.
@@ -248,55 +238,46 @@ func testeConcorrencia(brokerAddr string, nWorkers int) {
 	resumo(resultados, tempoTotal)
 }
 
-// ── TESTE 3 – Despacho completo (RESERVA + DESPACHAR) ────────────────────────
+// ── TESTE 3 – Despacho completo (Atômico) ─────────────────────────────────────
 //
-// Faz o protocolo inter-broker completo:
-//   1. RESERVA → obtém droneID
-//   2. DESPACHAR → drone recebe MISSAO e executa (5s)
+// Faz o protocolo inter-broker usando a nova operação atômica:
+//   1. Envia RESERVAR_E_DESPACHAR
+//   2. Drone recebe MISSAO e executa (5s)
 //
-// Mostra que o handshake entre brokers funciona de ponta a ponta.
+// Mostra que a reserva cruzada funciona em uma única ida à rede.
 
 func testeDespachoCompleto(brokerAlvo, brokerOrigem string, nReqs int) {
-	secao(fmt.Sprintf("TESTE 3 – Despacho Completo: %d req  origem=%s  alvo=%s", nReqs, brokerOrigem, brokerAlvo))
+	secao(fmt.Sprintf("TESTE 3 – Despacho Completo (Atômico): %d req  origem=%s  alvo=%s", nReqs, brokerOrigem, brokerAlvo))
 
 	var resultados []Resultado
 	inicio := time.Now()
 
 	for i := 1; i <= nReqs; i++ {
 		t := time.Now()
-		r := Resultado{Worker: i, Acao: "RESERVA+DESPACHAR"}
+		r := Resultado{Worker: i, Acao: "RESERVAR_E_DESPACHAR"}
 
-		// Passo 1: RESERVA com retry (drone pode estar em missão)
-		droneID, _, tentativas, err := reservarComRetry(brokerAlvo, brokerOrigem, 15*time.Second)
-		if err != nil {
-			r.Status = "ERRO"
-			r.Resposta = fmt.Sprintf("sem drone após %d tentativas", tentativas)
-			r.Duracao = time.Since(t)
-			imprimirLinha(r)
-			resultados = append(resultados, r)
-			continue
-		}
-
-		fmt.Printf("   → drone reservado: %s (%d tentativa(s))\n", droneID, tentativas)
-
-		// Passo 2: DESPACHAR
 		reqID := fmt.Sprintf("req-teste-%d-%d", i, time.Now().UnixNano())
-		err = despachar(brokerAlvo, brokerOrigem, droneID, reqID, "bloqueio_rota")
+
+		// Passo Único: Reserva e Despacha na mesma chamada
+		brokerResp, tentativas, err := reservarEdespacharComRetry(brokerAlvo, brokerOrigem, reqID, "bloqueio_rota", 15*time.Second)
+
 		r.Duracao = time.Since(t)
 
 		if err != nil {
 			r.Status = "ERRO"
-			r.Resposta = "falha no DESPACHAR: " + err.Error()
+			r.Resposta = fmt.Sprintf("falha após %d tentativas: %v", tentativas, err)
+			fmt.Printf("   ✘ %s\n", r.Resposta)
 		} else {
 			r.Status = "OK"
-			r.Resposta = fmt.Sprintf("drone %s em missão", droneID)
+			r.Resposta = fmt.Sprintf("despachado via %s", brokerResp)
+			fmt.Printf("   ✔ Missão despachada (reqID: %s) após %d tentativa(s)\n", reqID, tentativas)
 		}
 
 		imprimirLinha(r)
 		resultados = append(resultados, r)
 
 		// Missão dura 5s no drone — espera antes da próxima reserva
-		if i < nReqs {
+		if i < nReqs && err == nil {
 			fmt.Printf("   ⏳ aguardando conclusão da missão (6s)...\n")
 			time.Sleep(6 * time.Second)
 		}
@@ -308,37 +289,29 @@ func testeDespachoCompleto(brokerAlvo, brokerOrigem string, nReqs int) {
 // ── TESTE 4 – Drone cai durante missão (heartbeat + requeue) ─────────────────
 //
 // Fluxo:
-//   1. Reserva e despacha um drone em brokerAlvo
+//   1. Reserva e despacha atômicamente uma missão no brokerAlvo
 //   2. Para o container do drone enquanto está em missão
 //   3. Aguarda o broker detectar via heartbeat (timeout = 20s, check a cada 10s)
-//   4. Verifica nos logs se a requisição voltou para a fila (status → pendente)
-//   5. Reinicia o drone e verifica se ele reconecta e a fila é atendida
+//   4. Verifica nos logs se a requisição voltou para a fila
+//   5. Reinicia o drone e verifica se ele reconecta
 
 func testeDroneCaiEmMissao(brokerAddr, brokerOrigem, containerBroker, containerDrone string) {
 	secao(fmt.Sprintf("TESTE 4 – Drone Cai em Missão: %s", containerDrone))
 
-	// Passo 1: garante que tem drone disponível
-	fmt.Println("  [1/5] Reservando drone...")
-	droneID, _, tentativas, err := reservarComRetry(brokerAddr, brokerOrigem, 20*time.Second)
+	// Passo 1: Despacha missão atômicamente (unificou o que antes eram 2 passos)
+	fmt.Println("  [1/4] Reservando e despachando missão...")
+	reqID := fmt.Sprintf("req-morte-%d", time.Now().UnixNano())
+	_, tentativas, err := reservarEdespacharComRetry(brokerAddr, brokerOrigem, reqID, "bloqueio_rota", 20*time.Second)
+
 	if err != nil {
-		fmt.Printf("  ✘ Não foi possível reservar drone após %d tentativas: %v\n", tentativas, err)
+		fmt.Printf("  ✘ Falha no despacho após %d tentativas: %v\n", tentativas, err)
 		fmt.Println("      Verifique se o sistema está no ar e se há drone registrado no broker.")
 		return
 	}
-	fmt.Printf("  ✔ Drone reservado: %s\n", droneID)
+	fmt.Printf("  ✔ Missão despachada atômicamente (reqID: %s)\n", reqID)
 
-	// Passo 2: despacha missão
-	fmt.Println("  [2/5] Despachando missão...")
-	reqID := fmt.Sprintf("req-morte-%d", time.Now().UnixNano())
-	err = despachar(brokerAddr, brokerOrigem, droneID, reqID, "bloqueio_rota")
-	if err != nil {
-		fmt.Printf("  ✘ Falha no DESPACHAR: %v\n", err)
-		return
-	}
-	fmt.Printf("  ✔ Missão despachada (reqID: %s)\n", reqID)
-
-	// Passo 3: mata o drone no meio da missão (missão dura 5s, mata com 2s)
-	fmt.Printf("  [3/5] Aguardando 2s e matando %s...\n", containerDrone)
+	// Passo 2: mata o drone no meio da missão (missão dura 5s, mata com 2s)
+	fmt.Printf("  [2/4] Aguardando 2s e matando %s...\n", containerDrone)
 	time.Sleep(2 * time.Second)
 	err = dockerCmd("stop", containerDrone)
 	if err != nil {
@@ -347,12 +320,11 @@ func testeDroneCaiEmMissao(brokerAddr, brokerOrigem, containerBroker, containerD
 	}
 	fmt.Printf("  ✔ %s parado\n", containerDrone)
 
-	// Passo 4: aguarda detecção por heartbeat
-	// O broker checa a cada 10s, timeout em 20s — espera 25s pra garantir
-	fmt.Println("  [4/5] Aguardando detecção por heartbeat (25s)...")
+	// Passo 3: aguarda detecção por heartbeat
+	fmt.Println("  [3/4] Aguardando detecção por heartbeat (25s)...")
 	time.Sleep(25 * time.Second)
 
-	logs := logsDocker(containerBroker) // nome do container = host
+	logs := logsDocker(containerBroker)
 	logsMin := strings.ToLower(logs)
 
 	detectou := strings.Contains(logsMin, "timeout") ||
@@ -378,8 +350,8 @@ func testeDroneCaiEmMissao(brokerAddr, brokerOrigem, containerBroker, containerD
 		fmt.Println("✘ não encontrado nos logs")
 	}
 
-	// Passo 5: reinicia drone e verifica reconexão + atendimento da fila
-	fmt.Printf("  [5/5] Reiniciando %s...\n", containerDrone)
+	// Passo 4: reinicia drone
+	fmt.Printf("  [4/4] Reiniciando %s...\n", containerDrone)
 	dockerCmd("start", containerDrone)
 	time.Sleep(8 * time.Second)
 
@@ -395,7 +367,6 @@ func testeDroneCaiEmMissao(brokerAddr, brokerOrigem, containerBroker, containerD
 	} else {
 		fmt.Println("✘ não encontrado nos logs do drone")
 	}
-
 	fmt.Println()
 }
 
@@ -405,7 +376,7 @@ func testeDroneCaiEmMissao(brokerAddr, brokerOrigem, containerBroker, containerD
 //   1. Para o broker do setor do drone
 //   2. Aguarda o drone perceber a queda e tentar reconectar nos brokers alternativos
 //   3. Verifica nos logs do drone se ele conectou em outro broker
-//   4. Tenta reservar o drone no novo broker (RESERVA_OK = migração confirmada)
+//   4. Envia requisição nos alternativos para confirmar que ele atende
 //   5. Restaura o broker original
 
 func testeMigracaoDrone(brokerPrincipal, brokerAlternativo1, brokerAlternativo2 string,
@@ -413,18 +384,15 @@ func testeMigracaoDrone(brokerPrincipal, brokerAlternativo1, brokerAlternativo2 
 
 	secao(fmt.Sprintf("TESTE 5 – Migração de Drone: %s cai, %s migra", containerBroker, containerDrone))
 
-	// Passo 1: confirma que o drone está registrado no broker principal
+	// Passo 1: confirma que o drone está online enviando uma missão de teste rápida
 	fmt.Println("  [1/4] Verificando drone no broker principal...")
-	droneID, _, tentativas, err := reservarComRetry(brokerPrincipal, "tester", 10*time.Second)
+	reqIDTeste := fmt.Sprintf("req-teste-mig-%d", time.Now().UnixNano())
+	_, tentativas, err := reservarEdespacharComRetry(brokerPrincipal, "tester", reqIDTeste, "deriva", 10*time.Second)
 	if err != nil {
-		fmt.Printf("  ⚠  Drone não disponível no broker principal após %d tentativas\n", tentativas)
-		fmt.Println("      (pode estar em missão — tudo bem, continuando)")
+		fmt.Printf("  ⚠  Drone não atendeu no broker principal após %d tentativas\n", tentativas)
+		fmt.Println("      (pode estar offline ou em missão — continuando)")
 	} else {
-		// Libera o drone reservado mandando um despacho fictício não vai funcionar,
-		// então só loga que estava disponível
-		fmt.Printf("  ✔ Drone %s estava disponível no broker principal\n", droneID)
-		// Devolvemos o drone reservando e não despachando — ele ficará "indisponível"
-		// mas o heartbeat vai detectar a queda do broker e limpar
+		fmt.Printf("  ✔ Missão aceita no broker principal! Drone está lá.\n")
 	}
 
 	// Passo 2: para o broker principal
@@ -444,28 +412,30 @@ func testeMigracaoDrone(brokerPrincipal, brokerAlternativo1, brokerAlternativo2 
 	migrou := strings.Contains(logsDrone, "reconect") ||
 		strings.Contains(logsDrone, brokerAlternativo1[:strings.Index(brokerAlternativo1, ":")]) ||
 		strings.Contains(logsDrone, brokerAlternativo2[:strings.Index(brokerAlternativo2, ":")]) ||
-		strings.Contains(logsDrone, "nenhum broker") // tentou, mesmo que falhou
+		strings.Contains(logsDrone, "nenhum broker")
 
-	fmt.Printf("  Drone tentou migrar: ")
+	fmt.Printf("  Drone tentou migrar (logs): ")
 	if migrou {
 		fmt.Println("✔ sim (log confirma tentativa de reconexão)")
 	} else {
 		fmt.Println("✘ não encontrado nos logs do drone")
 	}
 
-	// Passo 4: tenta reservar o drone nos brokers alternativos
-	fmt.Println("  [4/4] Tentando reservar drone nos brokers alternativos...")
+	// Passo 4: tenta despachar missão nos brokers alternativos
+	fmt.Println("  [4/4] Tentando despachar missão nos brokers alternativos...")
 
 	reservouEmAlternativo := false
+	reqIDMigracao := fmt.Sprintf("req-migracao-%d", time.Now().UnixNano())
+
 	for _, addr := range []string{brokerAlternativo1, brokerAlternativo2} {
-		droneID, broker, _, err := reservarComRetry(addr, "tester-migracao", 8*time.Second)
+		brokerResp, _, err := reservarEdespacharComRetry(addr, "tester-migracao", reqIDMigracao, "inspecao_visual", 8*time.Second)
 		if err == nil {
-			fmt.Printf("  ✔ Drone %s encontrado em %s (broker: %s) — migração confirmada!\n",
-				droneID, addr, broker)
+			fmt.Printf("  ✔ Missão %s aceita em %s (broker processou: %s) — migração confirmada!\n",
+				reqIDMigracao, addr, brokerResp)
 			reservouEmAlternativo = true
 			break
 		}
-		fmt.Printf("  ✘ %s: sem drone disponível\n", addr)
+		fmt.Printf("  ✘ %s: sem drone disponível (despacho negado)\n", addr)
 	}
 
 	if !reservouEmAlternativo {
